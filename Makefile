@@ -1,53 +1,73 @@
-WGET ?= wget
+# Why would you redefine BUILD_DIR? Well, maybe you want it to be mktemp -d...
+BUILD_DIR ?= $(CURDIR)/build
 
 PACKAGE_EPOCH_PREFIX = 1:
-SOURCE_PACKAGE = openssh
-ORIG_VERSION = 8.9p1
-DEBIAN_VERSION = 3ubuntu0.4
-LAUNCHPAD_BASE = https://launchpad.net/ubuntu/+archive/primary/+sourcefiles
+SOURCE_PACKAGE       = openssh
+ORIG_VERSION         = 8.9p1
+DEBIAN_VERSION       = 3ubuntu0.4
+LAUNCHPAD_BASE       = https://launchpad.net/ubuntu/+archive/primary/+sourcefiles
 
-BUILDER_DOCKER_IMAGE = dc512-gimme-terrapin-builder
-PATCHED_DOCKER_IMAGE = dc512-gimme-terrapin-patched
+BUILDER_DOCKER_IMAGE    = dc512-gimme-terrapin-builder
+PATCHED_DOCKER_IMAGE    = dc512-gimme-terrapin-patched
 VULNERABLE_DOCKER_IMAGE = dc512-gimme-terrapin-vulnerable
 
-DEB_SRC_FILES = \
-	$(SOURCE_PACKAGE)_$(ORIG_VERSION).orig.tar.gz \
-	$(SOURCE_PACKAGE)_$(ORIG_VERSION).orig.tar.gz.asc \
-	$(SOURCE_PACKAGE)_$(ORIG_VERSION)-$(DEBIAN_VERSION).debian.tar.xz \
-	$(SOURCE_PACKAGE)_$(ORIG_VERSION)-$(DEBIAN_VERSION).dsc
+ORIG_TARBALL   = $(SOURCE_PACKAGE)_$(ORIG_VERSION).orig.tar.gz
+DEBIAN_SPEC    = $(SOURCE_PACKAGE)_$(ORIG_VERSION)-$(DEBIAN_VERSION).dsc
+DEBIAN_TARBALL = $(SOURCE_PACKAGE)_$(ORIG_VERSION)-$(DEBIAN_VERSION).debian.tar.xz
 
-DOWNLOAD_SRC_FILES = $(patsubst %,downloads/%,$(DEB_SRC_FILES))
+SRC_DIR            = $(BUILD_DIR)/$(SOURCE_PACKAGE)-$(ORIG_VERSION)
+SRC_FILES          = $(ORIG_TARBALL) $(DEBIAN_SPEC) $(DEBIAN_TARBALL)
+BUILD_SRC_FILES    = $(patsubst %,$(BUILD_DIR)/%,$(SRC_FILES))
+DOWNLOAD_SRC_FILES = $(patsubst %,downloads/%,$(SRC_FILES))
 
-CLEAN_FILES = artifacts build demo
-DIST_CLEAN_FILES = downloads
+# Yes, we are deleting all the files usually found inside build and then we are
+# deleting build. Why? Because we should get rid of any files we know we put
+# there, and we also need to get rid of the build folder itself, but we do not
+# know what BUILD_DIR might have been overridden with. It probably wasn't
+# overridden, and even if it was, it was probably overridden with mktemp -d.
+# But maybe some dummy ran make BUILD_DIR=${HOME} clean, in which case we do
+# not need to be the ones to speed such a person's inevitable demise.
+CLEAN_FILES = \
+	artifacts \
+	$(SRC_DIR) \
+	$(BUILD_SRC_FILES) \
+	build \
+	demo
+
+DIST_CLEAN_FILES = \
+	downloads
 
 .PHONY: all
-all: demo
+all: demo/.ssh/id_ed25519
 
-artifacts: build/$(SOURCE_PACKAGE)-$(ORIG_VERSION)/debian $(BUILD_SRC_FILES) build/.stamp-docker-builder
-	mkdir -p artifacts
+artifacts/.stamp: $(SRC_DIR)/debian/.stamp $(SRC_DIR)/.stamp  $(BUILD_SRC_FILES) .stamp-docker-builder
+	mkdir -p artifacts build
 	docker run -it --rm \
-		-v ${PWD}:/srv -w /srv/build/$(SOURCE_PACKAGE)-$(ORIG_VERSION) \
+		-v $(CURDIR):/srv \
+		-v $(BUILD_DIR):/srv/build \
+		-w /srv/build/$(SOURCE_PACKAGE)-$(ORIG_VERSION) \
 		-u `id -u`:`id -g` \
 		$(BUILDER_DOCKER_IMAGE) \
 		debuild -us -uc
-	find build \( -name '*.deb' -o -name '*.ddeb' \) -exec cp {} artifacts/. \;
+	find $(BUILD_DIR) \( -name '*.deb' -o -name '*.ddeb' \) -exec cp {} artifacts/. \;
 	touch $@
 
-$(BUILD_SRC_FILES): build/%: downloads/%
-	mkdir -p build
+$(BUILD_SRC_FILES): $(BUILD_DIR)/%: downloads/%
+	mkdir -p $(BUILD_DIR)
 	cp $< $@
 
-build/.stamp-docker-builder: Dockerfile.builder $(filter %.dsc,$(DOWNLOAD_SRC_FILES))
-	mkdir -p build
+.stamp-docker-builder: Dockerfile.builder downloads/$(DEBIAN_SPEC)
 	docker build --pull -t $(BUILDER_DOCKER_IMAGE) -f $< .
 	touch $@
 
-build/$(SOURCE_PACKAGE)-$(ORIG_VERSION): downloads/$(SOURCE_PACKAGE)_$(ORIG_VERSION).orig.tar.gz
-	cd build; tar xf $(CURDIR)/$<
+$(SRC_DIR)/.stamp: downloads/$(ORIG_TARBALL)
+	mkdir -p $(BUILD_DIR)
+	tar -C $(BUILD_DIR) -xf $(CURDIR)/$<
+	touch $@
 
-build/$(SOURCE_PACKAGE)-$(ORIG_VERSION)/debian: downloads/$(SOURCE_PACKAGE)_$(ORIG_VERSION)-$(DEBIAN_VERSION).debian.tar.xz | build/$(SOURCE_PACKAGE)-$(ORIG_VERSION)
-	cd build/$(SOURCE_PACKAGE)-$(ORIG_VERSION); tar xf $(CURDIR)/$<
+$(SRC_DIR)/debian/.stamp: downloads/$(DEBIAN_TARBALL) $(SRC_DIR)/.stamp
+	tar -C $(SRC_DIR) -xf $(CURDIR)/$<
+	touch $@
 
 .PHONY: clean
 clean:
@@ -57,25 +77,25 @@ downloads: $(DOWNLOAD_SRC_FILES)
 
 $(DOWNLOAD_SRC_FILES): downloads/%:
 	mkdir -p downloads
-	cd downloads; $(WGET) $(LAUNCHPAD_BASE)/$(SOURCE_PACKAGE)/$(PACKAGE_EPOCH_PREFIX)$(ORIG_VERSION)-$(DEBIAN_VERSION)/$*
+	cd downloads; wget $(LAUNCHPAD_BASE)/$(SOURCE_PACKAGE)/$(PACKAGE_EPOCH_PREFIX)$(ORIG_VERSION)-$(DEBIAN_VERSION)/$*
 
-demo/.ssh/id_ed25519: demo/.stamp-docker-vulnerable demo/etc/passwd
+demo/.ssh/id_ed25519: .stamp-docker-vulnerable demo/etc/passwd
 	mkdir -p demo/.ssh
 	chmod 700 demo/.ssh
 	docker run -it --rm \
 		-v $(CURDIR)/demo:/home/demo \
 		-v $(CURDIR)/demo/etc/passwd:/etc/passwd \
 		-w /home/demo \
-		-u $(shell id -u):$(shell id -g) \
+		-u `id -u`:`id -g` \
 		$(VULNERABLE_DOCKER_IMAGE) \
-		ssh-keygen -t ed25519 -f $(patsubst demo,,$@)
+		ssh-keygen -t ed25519 -N '' -f .ssh/id_ed25519
 
-demo/.stamp-docker-patched: Dockerfile.patched artifacts
+.stamp-docker-patched: Dockerfile.patched artifacts/.stamp
 	mkdir -p demo
 	docker build --pull -t $(PATCHED_DOCKER_IMAGE) -f $< .
 	touch $@
 
-demo/.stamp-docker-vulnerable: Dockerfile.vulnerable artifacts
+.stamp-docker-vulnerable: Dockerfile.vulnerable artifacts/.stamp
 	mkdir -p demo
 	docker build --pull -t $(VULNERABLE_DOCKER_IMAGE) -f $< .
 	touch $@
