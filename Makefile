@@ -9,6 +9,7 @@ LAUNCHPAD_BASE       = https://launchpad.net/ubuntu/+archive/primary/+sourcefile
 
 BUILDER_DOCKER_IMAGE    = dc512-gimme-terrapin-builder
 PATCHED_DOCKER_IMAGE    = dc512-gimme-terrapin-patched
+TCPDUMP_DOCKER_IMAGE      = dc512-gimme-terrapin-tcpdump
 VULNERABLE_DOCKER_IMAGE = dc512-gimme-terrapin-vulnerable
 
 ORIG_TARBALL   = $(SOURCE_PACKAGE)_$(ORIG_VERSION).orig.tar.gz
@@ -38,7 +39,7 @@ DIST_CLEAN_FILES = \
 	downloads
 
 .PHONY: all
-all: demo/.ssh/id_ed25519
+all: demo/home/demo/.ssh/id_ed25519
 
 artifacts/.stamp: $(SRC_DIR)/debian/.stamp $(SRC_DIR)/.stamp  $(BUILD_SRC_FILES) .stamp-docker-builder
 	mkdir -p artifacts build
@@ -56,9 +57,43 @@ $(BUILD_SRC_FILES): $(BUILD_DIR)/%: downloads/%
 	mkdir -p $(BUILD_DIR)
 	cp $< $@
 
-.stamp-docker-builder: Dockerfile.builder downloads/$(DEBIAN_SPEC)
-	docker build --pull -t $(BUILDER_DOCKER_IMAGE) -f $< .
-	touch $@
+.PHONY: clean
+clean:
+	-rm -rf $(CLEAN_FILES)
+
+demo/etc/passwd:
+	mkdir -p demo/etc
+	echo "demo:x:$(shell id -u):$(shell id -g)::/home/demo:/bin/bash" > $@
+
+demo/etc/ssh/sshd_host_ed25519_key: .stamp-docker-vulnerable demo/etc/passwd
+	mkdir -p demo/etc/ssh
+	chmod 700 demo/etc/ssh
+	docker run -it --rm \
+		-v $(CURDIR)/demo/home/demo:/home/demo \
+		-v $(CURDIR)/demo/etc/passwd:/etc/passwd \
+		-w /home/demo \
+		-u `id -u`:`id -g` \
+		$(VULNERABLE_DOCKER_IMAGE) \
+		ssh-keygen -t ed25519 -N '' -f /etc/ssh/sshd_host_ed25519_key
+
+demo/home/demo/.ssh/id_ed25519: .stamp-docker-vulnerable demo/etc/passwd
+	mkdir -p demo/home/demo/.ssh
+	chmod 700 demo/home/demo/.ssh
+	docker run -it --rm \
+		-v $(CURDIR)/demo/home/demo:/home/demo \
+		-v $(CURDIR)/demo/etc/passwd:/etc/passwd \
+		-w /home/demo \
+		-u `id -u`:`id -g` \
+		$(VULNERABLE_DOCKER_IMAGE) \
+		ssh-keygen -t ed25519 -N '' -f .ssh/id_ed25519
+
+.PHONY: distclean
+distclean: clean
+	-rm -rf $(DIST_CLEAN_FILES)downloads: $(DOWNLOAD_SRC_FILES)
+
+$(DOWNLOAD_SRC_FILES): downloads/%:
+	mkdir -p downloads
+	cd downloads; wget $(LAUNCHPAD_BASE)/$(SOURCE_PACKAGE)/$(PACKAGE_EPOCH_PREFIX)$(ORIG_VERSION)-$(DEBIAN_VERSION)/$*
 
 $(SRC_DIR)/.stamp: downloads/$(ORIG_TARBALL)
 	mkdir -p $(BUILD_DIR)
@@ -69,41 +104,21 @@ $(SRC_DIR)/debian/.stamp: downloads/$(DEBIAN_TARBALL) $(SRC_DIR)/.stamp
 	tar -C $(SRC_DIR) -xf $(CURDIR)/$<
 	touch $@
 
-.PHONY: clean
-clean:
-	-rm -rf $(CLEAN_FILES)
-
-downloads: $(DOWNLOAD_SRC_FILES)
-
-$(DOWNLOAD_SRC_FILES): downloads/%:
-	mkdir -p downloads
-	cd downloads; wget $(LAUNCHPAD_BASE)/$(SOURCE_PACKAGE)/$(PACKAGE_EPOCH_PREFIX)$(ORIG_VERSION)-$(DEBIAN_VERSION)/$*
-
-demo/.ssh/id_ed25519: .stamp-docker-vulnerable demo/etc/passwd
-	mkdir -p demo/.ssh
-	chmod 700 demo/.ssh
-	docker run -it --rm \
-		-v $(CURDIR)/demo:/home/demo \
-		-v $(CURDIR)/demo/etc/passwd:/etc/passwd \
-		-w /home/demo \
-		-u `id -u`:`id -g` \
-		$(VULNERABLE_DOCKER_IMAGE) \
-		ssh-keygen -t ed25519 -N '' -f .ssh/id_ed25519
+.stamp-docker-builder: Dockerfile.builder downloads/$(DEBIAN_SPEC)
+	docker build --pull -t $(BUILDER_DOCKER_IMAGE) -f $< .
+	touch $@
 
 .stamp-docker-patched: Dockerfile.patched artifacts/.stamp
 	mkdir -p demo
 	docker build --pull -t $(PATCHED_DOCKER_IMAGE) -f $< .
 	touch $@
 
+.stamp-docker-tcpdump: Dockerfile.tcpdump
+	mkdir -p demo
+	docker build --pull -t $(TCPDUMP_DOCKER_IMAGE) -f $< .
+	touch $@
+
 .stamp-docker-vulnerable: Dockerfile.vulnerable artifacts/.stamp
 	mkdir -p demo
 	docker build --pull -t $(VULNERABLE_DOCKER_IMAGE) -f $< .
 	touch $@
-
-demo/etc/passwd:
-	mkdir -p demo/etc
-	echo "demo:x:$(shell id -u):$(shell id -g)::/home/demo:/bin/bash" > $@
-
-.PHONY: distclean
-distclean: clean
-	-rm -rf $(DIST_CLEAN_FILES)
